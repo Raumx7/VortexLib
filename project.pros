@@ -1,7 +1,7 @@
 {
     "py/object": "pros.conductor.project.Project",
     "py/state": {
-        "project_name": "Drivetrain",
+        "project_name": "VortexLib",
         "target": "v5",
         "templates": {
             "kernel": {
@@ -16,7 +16,7 @@
                 },
                 "name": "kernel",
                 "py/object": "pros.conductor.templates.local_template.LocalTemplate",
-                "supported_kernels": null,
+                "supported_kernels": ">=4.2.2",
                 "system_files": [
                     "common.mk",
                     "include/pros/device.hpp",
