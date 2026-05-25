@@ -1,0 +1,33 @@
+# Compiled Object files
+*.o
+*.obj
+
+# Executables
+*.bin
+*.elf
+
+# PROS
+bin/
+firmware/
+.vscode/
+.cache/
+compile_commands.json
+temp.log
+temp.errors
+*.ini
+.d/
+
+# Objetos de la librería
+build/
+
+# Ignorar includes
+include/liblvgl/
+include/pros/
+include/api.h
+include/main.h
+
+# Ignorar el main.cpp
+src/main.cpp
+
+# Ignorar los zips generados por pros make template localmente
+*.zip
