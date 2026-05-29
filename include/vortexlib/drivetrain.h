@@ -44,9 +44,9 @@ namespace vortex {
         pros::MotorGroup& left;             // left motor group reference
         pros::MotorGroup& right;            // right motor group reference
 
-        pros::IMU&        imu;              // inertial sensor reference
         pros::Rotation&   rot_sensor_l;     // left tracking encoder reference
         pros::Rotation&   rot_sensor_r;     // right tracking encoder reference
+        pros::IMU&        imu;              // inertial sensor reference
 
         double circumference;               // M_PI * wheel_diameter (cm)
         double factor;                      // 1.0 / gear_ratio (wheel_turns / motor_turns)
@@ -56,6 +56,7 @@ namespace vortex {
         double odom_prev_r = 0.0;           // last recorded value — right sensor
 
         DriveConfig config;                 // motion configuration parameters
+        bool debug = false;                 // debug flag used in motion functions (printf)
 
         pros::MotorBrake previous_brake_mode = pros::MotorBrake::coast;     // stores the previous brake mode
 
@@ -71,9 +72,9 @@ namespace vortex {
         // ── Constructor ───────────────────────
         Drivetrain(pros::MotorGroup& left_motors, 
                     pros::MotorGroup& right_motors,
-                    pros::IMU& imu_sensor,
                     pros::Rotation& left_rotation,
                     pros::Rotation& right_rotation,
+                    pros::IMU& imu_sensor,
                     const DriveConfig& config,
                     double wheel_diameter, 
                     double gear_ratio = 1.0
@@ -81,6 +82,7 @@ namespace vortex {
 
         // ── Configuration ─────────────────────
         void set_brake_mode(const pros::MotorBrake& mode);
+        void set_debug();
         void set_reversed();                        
 
         // ── Telemetry ─────────────────────────

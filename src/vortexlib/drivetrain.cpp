@@ -15,9 +15,9 @@
  */
 vortex::Drivetrain::Drivetrain(pros::MotorGroup& left_motors, 
                                 pros::MotorGroup& right_motors,
-                                pros::IMU& imu_sensor,
                                 pros::Rotation& left_rotation,
                                 pros::Rotation& right_rotation,
+                                pros::IMU& imu_sensor,
                                 const DriveConfig& config, 
                                 double wheel_diameter, 
                                 double gear_ratio
@@ -25,9 +25,9 @@ vortex::Drivetrain::Drivetrain(pros::MotorGroup& left_motors,
     :
     left(left_motors),
     right(right_motors),
-    imu(imu_sensor),
     rot_sensor_l(left_rotation),
-    rot_sensor_r(right_rotation)
+    rot_sensor_r(right_rotation),
+    imu(imu_sensor)
 
 {
     this->config = config;
@@ -52,9 +52,18 @@ vortex::Drivetrain::Drivetrain(pros::MotorGroup& left_motors,
  * (e.g. coast or brake), since hold() may have changed it during auton.
  */
 void vortex::Drivetrain::set_brake_mode(const pros::MotorBrake& mode) {
+
     left.set_brake_mode(mode);
     right.set_brake_mode(mode);
+    previous_brake_mode = mode;
 }
+
+/*
+ * set_debug(): activates debug flag member attribute
+ * Motion methods print to console according to the state
+ * of this flag. This is a handy functionality for PID tuning.
+*/
+void vortex::Drivetrain::set_debug() {debug = true;}
 
 /*
  * set_reversed(): reverses both tracking encoders in software.
@@ -62,6 +71,7 @@ void vortex::Drivetrain::set_brake_mode(const pros::MotorBrake& mode) {
  * during forward motion. Must be called before the first update_odom() cycle.
  */
 void vortex::Drivetrain::set_reversed() {
+
     rot_sensor_l.set_reversed(true);
     rot_sensor_r.set_reversed(true);
 }
@@ -92,9 +102,7 @@ double vortex::Drivetrain::get_distance() const {
  * This is a snapshot — the background odom task keeps updating current_pose
  * concurrently; do not cache the result across multiple motion commands.
  */
-vortex::Pose vortex::Drivetrain::get_pose() const {
-    return current_pose;
-}
+vortex::Pose vortex::Drivetrain::get_pose() const { return current_pose; }
 
 /*
  * is_overheating(): returns true if any motor in either group exceeds 55 °C.
@@ -102,6 +110,7 @@ vortex::Pose vortex::Drivetrain::get_pose() const {
  * direct max-temperature query. Conservative threshold for long matches.
  */
 bool vortex::Drivetrain::is_overheating() const {
+
     const double TEMP_LIMIT = 55.0;
 
     for (int i = 0; i < (int)left.size(); i++) {
@@ -119,16 +128,14 @@ bool vortex::Drivetrain::is_overheating() const {
  * relative to the robot's starting tile (adjust for alliance color as needed).
  * Does not reset encoder counts — call reset_positions() separately if needed.
  */
-void vortex::Drivetrain::set_pose(const Pose& pose) {
-    current_pose = pose;
-}
+void vortex::Drivetrain::set_pose(const Pose& pose) { current_pose = pose; }
 
 // ─────────────────────────────────────────────
 //  DRIVER CONTROL
 // ─────────────────────────────────────────────
 
 /*
- * arcade(): maps joystick axes to differential drive using a cubic response curve.
+ * arcade(): maps joystick axes to differential drive.
  *
  * The cubic mapping (v³ / 127²) preserves sign, compresses low-speed inputs
  * for fine control around center, and reaches full output at the joystick limit.
@@ -138,15 +145,12 @@ void vortex::Drivetrain::set_pose(const Pose& pose) {
  * turn    : right stick X [-127, 127]
  */
 void vortex::Drivetrain::arcade(int forward, int turn) {
+
     if (std::abs(forward) < 5) forward = 0;
     if (std::abs(turn)   < 5) turn    = 0;
 
-    // Cubic curve: greater precision in fine movements
-    int exp_forward = (forward * forward * forward) / (127 * 127);
-    int exp_turn    = (turn    * turn    * turn)    / (127 * 127);
-
-    left.move (exp_forward + exp_turn);
-    right.move(exp_forward - exp_turn);
+    left.move (forward + turn);
+    right.move(forward - turn);
 }
 
 /*
@@ -162,8 +166,6 @@ void vortex::Drivetrain::arcade(int forward, int turn) {
  *                   (driver-control use — gives a firm stop before returning input)
  */
 void vortex::Drivetrain::hold(int duration_ms) {
-
-    previous_brake_mode = left.get_brake_mode(); 
 
     left.set_brake_mode(pros::MotorBrake::hold);
     right.set_brake_mode(pros::MotorBrake::hold);
@@ -226,15 +228,26 @@ void vortex::Drivetrain::reset_positions() {
  * 3-second safety timeout prevents stalling if the robot is physically blocked.
  */
 void vortex::Drivetrain::swing_turn(int degrees, const Side& side, int max_vel) {
+    // Calculate the target heading by adding the desired delta to the current angle.
+    double target_heading = imu.get_heading() + degrees;
 
-    double target     = imu.get_rotation() + degrees;
-    double error      = degrees;
-    double last_error = degrees;
+    double error      = normalize_angle(target_heading - imu.get_heading());
+    double last_error = error;
+    double integral   = 0.0;
 
-    const double kp = 1.2;
-    const double kd = 0.5;
+    uint32_t start_time    = pros::millis();
+    uint32_t settled_since = 0;
 
-    // The pivot side brakes; the other side propels
+    // ── Tunable Thresholds (Inherited from the turn PID) ────────────────────
+    constexpr double EXIT_ERROR     = 1.0;
+    constexpr double SETTLE_TIME_MS = 120.0;
+    constexpr double INTEGRAL_ZONE  = 15.0;
+    constexpr double INTEGRAL_LIMIT = 40.0;
+    constexpr double FRICTION_ZONE  = 8.0;
+
+    // ── Configure the static pivot ──────────────────────────────────────────
+    // Locking the pivot axis with HOLD active ensures the robot rotates precisely
+    // on that side of the chassis.
     if (side == Side::LEFT) {
         left.set_brake_mode(pros::MotorBrake::hold);
         left.brake();
@@ -243,34 +256,83 @@ void vortex::Drivetrain::swing_turn(int degrees, const Side& side, int max_vel) 
         right.brake();
     }
 
-    uint32_t start_time = pros::millis();
+    // 3-second safety timeout (same as face_angle)
+    while ((pros::millis() - start_time) < 3000) {
 
-    while (std::abs(error) > 1.0 && (pros::millis() - start_time < 3000)) {
+        double heading = imu.get_heading();
+        error = normalize_angle(target_heading - heading);
 
-        error = target - imu.get_rotation();
+        // ── Integral with anti-windup ──────────────────── ─────────────────────
+        if (config.turn_pid.ki != 0.0 && std::abs(error) < INTEGRAL_ZONE) {
+            integral += error;
+            integral  = std::clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
+        } else {
+            integral = 0.0;
+        }
+
+        // ── Derivative ─────────────────────────────────────────────────────────
         double derivative = error - last_error;
 
-        int voltage = static_cast<int>((error * kp) + (derivative * kd));
-        voltage = (voltage >  max_vel) ?  max_vel : voltage;
-        voltage = (voltage < -max_vel) ? -max_vel : voltage;
+        // ── Output PID ────────────────────────────────────────────────────────
+        double output =
+            (error      * config.turn_pid.kp) +
+            (integral   * config.turn_pid.ki) +
+            (derivative * config.turn_pid.kd);
 
-        if (side == Side::LEFT) {           
-            // Left wheel stationary; right wheel pushes in the opposite direction
-            right.move(-voltage);
+        // Limit max voltage
+        output = std::clamp(output, static_cast<double>(-max_vel), static_cast<double>(max_vel));
+
+        // ── Friction Compensation ─────────────────────────────────────────
+        // Note: A swing turn requires overcoming more friction than a center pivot point.
+        // If you notice it stalling, you could multiply min_turn by approximately 1.2.
+        if (std::abs(error) > EXIT_ERROR &&
+            std::abs(error) < FRICTION_ZONE &&
+            std::abs(output) < config.params.min_turn) {
+
+            output = (output >= 0.0) ? config.params.min_turn : -config.params.min_turn;
+        }
+
+        // ── Settlement Filter (Settle Timer) ─────────────────────────────
+        if (std::abs(error) < EXIT_ERROR) {
+            if (settled_since == 0) settled_since = pros::millis();
+            if ((pros::millis() - settled_since) > SETTLE_TIME_MS) break;
         } else {
-            left.move(voltage);
+            settled_since = 0;
+        }
+
+        // ── Telemetry Debug ──────────────────────────────────────────────────
+        if (debug) {
+            printf(
+                "[SWING] side: %s | error: %.2f | integral: %.2f | deriv: %.2f | out: %.2f\n",
+                (side == Side::LEFT ? "LEFT" : "RIGHT"), error, integral, derivative, output
+            );
+        }
+
+        // ── Dynamic Voltage Injection to the Active Side ──────────────────────
+        // The side chosen as the pivot is NOT updated in the loop (.move),
+        // it remains under the active brake command (.brake) given initially.
+        if (side == Side::LEFT) {
+            // If the pivot is on the left, the right handles all the torque.
+            // Note the negative sign: a positive error requires the right side to
+            //push back so the chassis rotates clockwise.
+            right.move(-static_cast<int>(output));
+        } else {
+            // If the pivot is on the right, the left moves.
+            left.move(static_cast<int>(output));
         }
 
         last_error = error;
         pros::delay(20);
     }
 
-    left.brake();
-    right.brake();
+    // ── Exit behavior ─────────────────────────────────────────────────────────
+    hold(150);
+    left.move(0);
+    right.move(0);
 }
 
 // ─────────────────────────────────────────────
-//  ODOMETRÍA
+//  ODOMETRY
 // ─────────────────────────────────────────────
 
 /*
@@ -353,53 +415,118 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
     double last_error = error;
     double integral   = 0.0;
 
-    uint32_t start_time = pros::millis();
+    uint32_t start_time   = pros::millis();
+    uint32_t settled_since = 0;
 
-    while (std::abs(error) > 1.0 && (pros::millis() - start_time < 3000)) {
+    // ── Tuneable thresholds ───────────────────────────────────────────────────
+    //
+    //  EXIT_ERROR    : tolerance band to start the settle timer (degrees)
+    //  SETTLE_TIME   : how long error must stay inside EXIT_ERROR before exit (ms)
+    //  INTEGRAL_ZONE : gate — integral only accumulates below this error (degrees)
+    //                  set above the expected steady-state error so ki kicks in
+    //                  before the robot fully stalls
+    //  INTEGRAL_LIMIT: symmetric clamp on the integral term to prevent windup
+    //  FRICTION_ZONE : friction compensation applies when error is inside this
+    //                  band (degrees). Must be LARGER than EXIT_ERROR so the
+    //                  compensation is still active when the robot is nearly settled.
+    //                  Rule of thumb: set to ~3–4× EXIT_ERROR.
+    //
+    constexpr double EXIT_ERROR     = 1.0;
+    constexpr double SETTLE_TIME_MS = 120.0;
+    constexpr double INTEGRAL_ZONE  = 15.0;
+    constexpr double INTEGRAL_LIMIT = 40.0;
+    constexpr double FRICTION_ZONE  = 8.0;   // was MIN_TURN_ZONE = 3.0 → too small
 
-        error = normalize_angle(target_heading - imu.get_heading());
+    while ((pros::millis() - start_time) < 3000) {
 
-        // 1. Windup Integral Mitigation: Only accumulate if the error is less than 15 degrees
-        if (std::abs(error) < 15.0) {
+        double heading = imu.get_heading();
+        error = normalize_angle(target_heading - heading);
+
+        // ── Integral with anti-windup ─────────────────────────────────────────
+        //
+        // Gate: only accumulate when ki is nonzero and error is small enough
+        // that windup is not a concern. Reset when outside the zone so that a
+        // large approach does not carry a pre-loaded integral into the fine stage.
+        //
+        if (config.turn_pid.ki != 0.0 && std::abs(error) < INTEGRAL_ZONE) {
             integral += error;
+            integral  = std::clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
         } else {
             integral = 0.0;
         }
 
-        // 2. Direct derivative without double normalization
+        // ── Derivative ────────────────────────────────────────────────────────
         double derivative = error - last_error;
 
+        // ── PID output ────────────────────────────────────────────────────────
         double output =
             (error      * config.turn_pid.kp) +
             (integral   * config.turn_pid.ki) +
             (derivative * config.turn_pid.kd);
 
-        // 3. Friction compensation BEFORE the clamp
-        if (std::abs(error) > 1.0 && std::abs(output) < config.params.min_turn) {
-            output = (output >= 0) ? config.params.min_turn : -config.params.min_turn;
+        // ── max_vel clamp ─────────────────────────────────────────────────────
+        output = std::clamp(
+            output,
+            static_cast<double>(-max_vel),
+            static_cast<double>( max_vel)
+        );
+
+        // ── Friction compensation ─────────────────────────────────────────────
+        //
+        // Applied AFTER the max_vel clamp so it never exceeds the requested limit.
+        //
+        // Condition: error is inside FRICTION_ZONE (robot is in the fine-approach
+        // stage) AND the PID output is too weak to overcome static friction.
+        //
+        // With FRICTION_ZONE = 8°, this activates before EXIT_ERROR (1°), giving
+        // the robot enough force to keep moving through the last few degrees
+        // instead of stalling at ~4° like the original config did.
+        //
+        if (std::abs(error) > EXIT_ERROR &&
+            std::abs(error) < FRICTION_ZONE &&
+            std::abs(output) < config.params.min_turn) {
+
+            output = (output >= 0.0) ? config.params.min_turn : -config.params.min_turn;
         }
 
-        // 4. The clamp now properly protects the actual limits of the motor.
-        int command = static_cast<int>(std::clamp(output, static_cast<double>(-max_vel), static_cast<double>(max_vel)));
+        // ── Settle timer ──────────────────────────────────────────────────────
+        //
+        // Require the error to stay inside EXIT_ERROR for SETTLE_TIME_MS before
+        // breaking. Prevents a lucky single sample inside the band from exiting
+        // early while the robot is still oscillating through zero.
+        //
+        if (std::abs(error) < EXIT_ERROR) {
 
-        left.move(command);
-        right.move(-command);
+            if (settled_since == 0)
+                settled_since = pros::millis();
+
+            if ((pros::millis() - settled_since) > SETTLE_TIME_MS)
+                break;
+
+        } else {
+            settled_since = 0;
+        }
+
+        // ── Debug ─────────────────────────────────────────────────────────────
+        if (debug) {
+            printf(
+                "heading: %.2f | error: %.2f | integral: %.2f | deriv: %.2f | out: %.2f\n",
+                heading, error, integral, derivative, output
+            );
+        }
+
+        // ── Drive ─────────────────────────────────────────────────────────────
+        left.move ( static_cast<int>(output));
+        right.move(-static_cast<int>(output));
 
         last_error = error;
         pros::delay(20);
     }
 
-    if (pros::competition::is_autonomous()) {
-
-        hold();
-
-    } else {
-
-        hold(150);
-
-        left.move(0);
-        right.move(0);
-    }
+    // ── Exit behavior ─────────────────────────────────────────────────────────
+    hold(150);
+    left.move(0);
+    right.move(0);
 }
 
 /*
@@ -426,150 +553,145 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
  * voltage in driver control.
  */
 void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
-
     double start_dist = get_distance();
-
     double target_angle = imu.get_heading();
-
     double current_speed = 0.0;
 
     double integral   = 0.0;
     double last_error = static_cast<double>(target_cm);
 
-    constexpr double dt = 0.02;
+    constexpr double dt = 0.02; // 20 ms loop step
 
-    // ─────────────────────────────
-    //  Limits
-    // ─────────────────────────────
-
+    // ──────────────────────────────────────────────────────────────────────────
+    //  Tuneable thresholds and internal limits
+    // ──────────────────────────────────────────────────────────────────────────
+    //
+    //  EXIT_ERROR     : tolerance band to start the settle timer (cm)
+    //  SETTLE_TIME_MS : how long error must stay inside EXIT_ERROR before exit (ms)
+    //  ANGLE_DEADBAND : window to dampen tiny gyro noise and prevent hunting (degrees)
+    //  INTEGRAL_ZONE  : gate — translational integral only accumulates below this error (cm)
+    //  INTEGRAL_LIMIT : symmetric clamp on the translational integral term to prevent windup
+    //  DECEL_STEP     : aggressive deceleration factor to suppress forward overshoot
+    //
+    constexpr double EXIT_ERROR     = 1.0;
+    constexpr double SETTLE_TIME_MS = 120.0;
     constexpr double ANGLE_DEADBAND  = 0.2;
-
     constexpr double INTEGRAL_ZONE   = 12.0;
     constexpr double INTEGRAL_LIMIT  = 40.0;
-
-    // More aggressive deceleration
+    
     const double DECEL_STEP = config.params.accel_st * 2.5;
 
-    uint32_t start_time = pros::millis();
+    uint32_t start_time    = pros::millis();
+    uint32_t settled_since = 0;
 
+    // 5-second safety timeout
     while ((pros::millis() - start_time) < 5000) {
 
-        // ─────────────────────────────
-        //  Distance error
-        // ─────────────────────────────
-
+        // ── Distance calculations ─────────────────────────────────────────────
         double current_dist = get_distance() - start_dist;
+        double dist_error   = target_cm - current_dist;
 
-        double dist_error = target_cm - current_dist;
+        // ── Settle timer (Exit condition) ─────────────────────────────────────
+        //
+        // Requires the error to stay inside EXIT_ERROR for SETTLE_TIME_MS before
+        // breaking. Prevents a single zero-crossing sample from exiting early 
+        // while the robot is still undergoing inertial deceleration or oscillation.
+        //
+        if (std::abs(dist_error) <= EXIT_ERROR) {
+            if (settled_since == 0)
+                settled_since = pros::millis();
 
-        // Fin del movimiento
-        if (std::abs(dist_error) <= 1.0) {
-            break;
+            if ((pros::millis() - settled_since) > SETTLE_TIME_MS)
+                break;
+        } else {
+            settled_since = 0;
         }
 
-        // ─────────────────────────────
-        //  Integral con anti-windup
-        // ─────────────────────────────
-
-        if (std::abs(dist_error) < INTEGRAL_ZONE) {
-
+        // ── Integral with anti-windup ─────────────────────────────────────────
+        if (config.move_pid.ki != 0.0 && std::abs(dist_error) < INTEGRAL_ZONE) {
             integral += dist_error * dt;
-
-            integral = std::clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
-
+            integral  = std::clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
         } else {
             integral = 0.0;
         }
 
-        // ─────────────────────────────
-        //  Derivada
-        // ─────────────────────────────
-
+        // ── Derivative ────────────────────────────────────────────────────────
         double derivative = (dist_error - last_error) / dt;
 
-        // ─────────────────────────────
-        //  PID translacional
-        // ─────────────────────────────
-
+        // ── Translational PID calculation ─────────────────────────────────────
         double target_speed =
             (dist_error * config.move_pid.kp) +
             (integral   * config.move_pid.ki) +
             (derivative * config.move_pid.kd);
 
-        target_speed = std::clamp(target_speed, static_cast<double>(-max_vel), static_cast<double>( max_vel));
+        // Maximum velocity clamp
+        target_speed = std::clamp(
+            target_speed, 
+            static_cast<double>(-max_vel), 
+            static_cast<double>( max_vel)
+        );
 
-        // ─────────────────────────────
-        //  Compensación de fricción
-        // ─────────────────────────────
-
-        if (std::abs(target_speed) < config.params.min_move && std::abs(dist_error) > 1.0) {
-
+        // ── Friction compensation ─────────────────────────────────────────────
+        //
+        // Applied AFTER the max_vel clamp so it never exceeds requested boundaries.
+        // Forces target_speed to meet min_move if the PID is too weak to overcome
+        // the chassis static friction during fine-approach stages.
+        //
+        if (std::abs(dist_error) > EXIT_ERROR && std::abs(target_speed) < config.params.min_move) {
             target_speed = (target_speed >= 0.0) ? config.params.min_move : -config.params.min_move;
         }
 
-        // ─────────────────────────────
-        //  Bidirectional slew rate 
-        // ─────────────────────────────
-
+        // ── Bidirectional slew rate ──────────────────────────────────────────
+        //
+        // Dynamically adjusts the step magnitude. Uses a sharper DECEL_STEP if 
+        // the robot needs to slow down fast to prevent running past the target point.
+        //
         double step = (std::abs(target_speed) < std::abs(current_speed)) ? DECEL_STEP : config.params.accel_st;
-
         double delta = target_speed - current_speed;
-
+        
         delta = std::clamp(delta, -step, step);
-
         current_speed += delta;
 
-        // ─────────────────────────────
-        //  Angular correction
-        // ─────────────────────────────
-
+        // ── Angular correction (Heading hold) ─────────────────────────────────
+        //
+        // Keeps the robot driving in a perfectly straight line using the IMU.
+        // Scale down the error if it falls under ANGLE_DEADBAND to eliminate 
+        // high-frequency chatter from sensor fluctuations.
+        //
         double angle_error = normalize_angle(target_angle - imu.get_heading());
 
-        if (std::abs(angle_error) < ANGLE_DEADBAND) 
+        if (std::abs(angle_error) < ANGLE_DEADBAND) {
             angle_error *= 0.3;
+        }
 
         int steer_output = static_cast<int>(angle_error * config.params.angle_kp);
 
-        // ─────────────────────────────
-        //  Final output
-        // ─────────────────────────────
-
-        int left_command = static_cast<int>(current_speed) + steer_output;
-
+        // ── Final motor output layout ─────────────────────────────────────────
+        int left_command  = static_cast<int>(current_speed) + steer_output;
         int right_command = static_cast<int>(current_speed) - steer_output;
 
-        printf(
-        "heading: %.2f | angle_error: %.2f | steer: %d | speed: %.2f\n",
-        imu.get_heading(),
-        angle_error,
-        steer_output,
-        current_speed
-        );
+        // ── Telemetry Debug ───────────────────────────────────────────────────
+        if (debug) {
+            printf(
+                "dist: %.2f | err: %.2f | spd: %.2f | target: %.2f | head: %.2f | ang_err: %.2f | steer: %d\n",
+                current_dist, dist_error, current_speed, target_speed, imu.get_heading(), angle_error, steer_output
+            );
+        }
 
+        // Output to the physical hardware with safety maximum constraints
         left.move(std::clamp(left_command, -max_vel, max_vel));
-
         right.move(std::clamp(right_command, -max_vel, max_vel));
 
         last_error = dist_error;
-
         pros::delay(20);
     }
 
-    // ─────────────────────────────
-    //  Final brake
-    // ─────────────────────────────
-
-    if (pros::competition::is_autonomous()) {
-
-        hold();
-
-    } else {
-
-        hold(150);
-
-        left.move(0);
-        right.move(0);
-    }
+    // ── Exit behavior ─────────────────────────────────────────────────────────
+    // Actively lock down position using HOLD to cancel momentum, then release
+    // the system state safely to preserve driver manual baseline setups.
+    hold(150);
+    left.move(0);
+    right.move(0);
 }
 
 /*
