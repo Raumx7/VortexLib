@@ -18,7 +18,7 @@ vortex::Drivetrain::Drivetrain(pros::MotorGroup& left_motors,
                                 pros::Rotation& left_rotation,
                                 pros::Rotation& right_rotation,
                                 pros::IMU& imu_sensor,
-                                const DriveConfig& config, 
+                                const Config& config, 
                                 double wheel_diameter, 
                                 double gear_ratio
 ) 
@@ -30,7 +30,7 @@ vortex::Drivetrain::Drivetrain(pros::MotorGroup& left_motors,
     imu(imu_sensor)
 
 {
-    this->config = config;
+    this->m_config = config;
     
     circumference = M_PI * wheel_diameter;
     factor        = 1.0 / gear_ratio;
@@ -263,7 +263,7 @@ void vortex::Drivetrain::swing_turn(int degrees, const Side& side, int max_vel) 
         error = normalize_angle(target_heading - heading);
 
         // ── Integral with anti-windup ──────────────────── ─────────────────────
-        if (config.turn_pid.ki != 0.0 && std::abs(error) < INTEGRAL_ZONE) {
+        if (m_config.turn_pid.ki != 0.0 && std::abs(error) < INTEGRAL_ZONE) {
             integral += error;
             integral  = std::clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
         } else {
@@ -275,9 +275,9 @@ void vortex::Drivetrain::swing_turn(int degrees, const Side& side, int max_vel) 
 
         // ── Output PID ────────────────────────────────────────────────────────
         double output =
-            (error      * config.turn_pid.kp) +
-            (integral   * config.turn_pid.ki) +
-            (derivative * config.turn_pid.kd);
+            (error      * m_config.turn_pid.kp) +
+            (integral   * m_config.turn_pid.ki) +
+            (derivative * m_config.turn_pid.kd);
 
         // Limit max voltage
         output = std::clamp(output, static_cast<double>(-max_vel), static_cast<double>(max_vel));
@@ -287,9 +287,9 @@ void vortex::Drivetrain::swing_turn(int degrees, const Side& side, int max_vel) 
         // If you notice it stalling, you could multiply min_turn by approximately 1.2.
         if (std::abs(error) > EXIT_ERROR &&
             std::abs(error) < FRICTION_ZONE &&
-            std::abs(output) < config.params.min_turn) {
+            std::abs(output) < m_config.params.min_turn) {
 
-            output = (output >= 0.0) ? config.params.min_turn : -config.params.min_turn;
+            output = (output >= 0.0) ? m_config.params.min_turn : -m_config.params.min_turn;
         }
 
         // ── Settlement Filter (Settle Timer) ─────────────────────────────
@@ -448,7 +448,7 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
         // that windup is not a concern. Reset when outside the zone so that a
         // large approach does not carry a pre-loaded integral into the fine stage.
         //
-        if (config.turn_pid.ki != 0.0 && std::abs(error) < INTEGRAL_ZONE) {
+        if (m_config.turn_pid.ki != 0.0 && std::abs(error) < INTEGRAL_ZONE) {
             integral += error;
             integral  = std::clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
         } else {
@@ -460,9 +460,9 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
 
         // ── PID output ────────────────────────────────────────────────────────
         double output =
-            (error      * config.turn_pid.kp) +
-            (integral   * config.turn_pid.ki) +
-            (derivative * config.turn_pid.kd);
+            (error      * m_config.turn_pid.kp) +
+            (integral   * m_config.turn_pid.ki) +
+            (derivative * m_config.turn_pid.kd);
 
         // ── max_vel clamp ─────────────────────────────────────────────────────
         output = std::clamp(
@@ -484,9 +484,9 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
         //
         if (std::abs(error) > EXIT_ERROR &&
             std::abs(error) < FRICTION_ZONE &&
-            std::abs(output) < config.params.min_turn) {
+            std::abs(output) < m_config.params.min_turn) {
 
-            output = (output >= 0.0) ? config.params.min_turn : -config.params.min_turn;
+            output = (output >= 0.0) ? m_config.params.min_turn : -m_config.params.min_turn;
         }
 
         // ── Settle timer ──────────────────────────────────────────────────────
@@ -579,7 +579,7 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
     constexpr double INTEGRAL_ZONE   = 12.0;
     constexpr double INTEGRAL_LIMIT  = 40.0;
     
-    const double DECEL_STEP = config.params.accel_st * 2.5;
+    const double DECEL_STEP = m_config.params.accel_st * 2.5;
 
     uint32_t start_time    = pros::millis();
     uint32_t settled_since = 0;
@@ -608,7 +608,7 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
         }
 
         // ── Integral with anti-windup ─────────────────────────────────────────
-        if (config.move_pid.ki != 0.0 && std::abs(dist_error) < INTEGRAL_ZONE) {
+        if (m_config.move_pid.ki != 0.0 && std::abs(dist_error) < INTEGRAL_ZONE) {
             integral += dist_error * dt;
             integral  = std::clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
         } else {
@@ -620,9 +620,9 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
 
         // ── Translational PID calculation ─────────────────────────────────────
         double target_speed =
-            (dist_error * config.move_pid.kp) +
-            (integral   * config.move_pid.ki) +
-            (derivative * config.move_pid.kd);
+            (dist_error * m_config.move_pid.kp) +
+            (integral   * m_config.move_pid.ki) +
+            (derivative * m_config.move_pid.kd);
 
         // Maximum velocity clamp
         target_speed = std::clamp(
@@ -637,8 +637,8 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
         // Forces target_speed to meet min_move if the PID is too weak to overcome
         // the chassis static friction during fine-approach stages.
         //
-        if (std::abs(dist_error) > EXIT_ERROR && std::abs(target_speed) < config.params.min_move) {
-            target_speed = (target_speed >= 0.0) ? config.params.min_move : -config.params.min_move;
+        if (std::abs(dist_error) > EXIT_ERROR && std::abs(target_speed) < m_config.params.min_move) {
+            target_speed = (target_speed >= 0.0) ? m_config.params.min_move : -m_config.params.min_move;
         }
 
         // ── Bidirectional slew rate ──────────────────────────────────────────
@@ -646,7 +646,7 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
         // Dynamically adjusts the step magnitude. Uses a sharper DECEL_STEP if 
         // the robot needs to slow down fast to prevent running past the target point.
         //
-        double step = (std::abs(target_speed) < std::abs(current_speed)) ? DECEL_STEP : config.params.accel_st;
+        double step = (std::abs(target_speed) < std::abs(current_speed)) ? DECEL_STEP : m_config.params.accel_st;
         double delta = target_speed - current_speed;
         
         delta = std::clamp(delta, -step, step);
@@ -664,7 +664,7 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
             angle_error *= 0.3;
         }
 
-        int steer_output = static_cast<int>(angle_error * config.params.angle_kp);
+        int steer_output = static_cast<int>(angle_error * m_config.params.angle_kp);
 
         // ── Final motor output layout ─────────────────────────────────────────
         int left_command  = static_cast<int>(current_speed) + steer_output;
