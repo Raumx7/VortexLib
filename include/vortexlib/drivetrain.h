@@ -10,21 +10,22 @@ namespace vortex {
 
     class Drivetrain {
     public:
-        
-        struct MoveParams {
-            double angle_kp;        // heading correction gain in move_centimeters()
-            double accel_st;        // acceleration step in move_centimeters()
-            double min_move;        // minimum output threshold in move_centimeters()
-            double min_turn;        // minimum output threshold in face_angle()
-        };
 
         struct Config {
-            PIDConstants move_pid;  // PID constants for move_centimeters()
-            PIDConstants turn_pid;  // PID constants for face_angle()
-            MoveParams   params;    // shared motion and rotation parameters
+            PIDConstants move_pid;          // PID constants for move_centimeters()
+            PIDConstants turn_pid;          // PID constants for face_angle()
+            MoveParams   params;            // shared motion and rotation parameters
+            Wheel        wheel_type;        // vex v5 wheel
+            double       gear_ratio = 1.0;  // (driven / drive)
         };
 
     private:
+
+        struct MotionParams {
+            PIDConstants move_pid;
+            PIDConstants turn_pid;
+            MoveParams   params;
+        };
         
         pros::MotorGroup& left;             // left motor group reference
         pros::MotorGroup& right;            // right motor group reference
@@ -36,11 +37,12 @@ namespace vortex {
         double circumference;               // M_PI * wheel_diameter (cm)
         double factor;                      // 1.0 / gear_ratio (wheel_turns / motor_turns)
 
-        Pose   current_pose;                // accumulated odometry position
+        Pose        current_pose;           // accumulated odometry position
+        pros::Mutex   odom_mutex;           // synchronize access to the robot's position
         double odom_prev_l = 0.0;           // last recorded value — left sensor
         double odom_prev_r = 0.0;           // last recorded value — right sensor
 
-        Config m_config;                    // Motion configuration parameters
+        const MotionParams m_params;        // motion parameters
         bool debug = false;                 // debug flag used in motion functions (printf)
 
         pros::MotorBrake previous_brake_mode = pros::MotorBrake::coast;     // stores the previous brake mode
@@ -53,9 +55,7 @@ namespace vortex {
                     pros::Rotation& left_rotation,
                     pros::Rotation& right_rotation,
                     pros::IMU& imu_sensor,
-                    const Config& config,
-                    double wheel_diameter, 
-                    double gear_ratio = 1.0
+                    const Config& config
         );
 
         // ── Configuration setters ──────────────

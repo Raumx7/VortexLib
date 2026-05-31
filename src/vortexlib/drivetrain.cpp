@@ -1,3 +1,4 @@
+#include <mutex>
 #include "vortexlib/drivetrain.h"
 
 // ─────────────────────────────────────────────
@@ -18,28 +19,24 @@ vortex::Drivetrain::Drivetrain(pros::MotorGroup& left_motors,
                                 pros::Rotation& left_rotation,
                                 pros::Rotation& right_rotation,
                                 pros::IMU& imu_sensor,
-                                const Config& config, 
-                                double wheel_diameter, 
-                                double gear_ratio
+                                const Config& config
 ) 
     :
     left(left_motors),
     right(right_motors),
     rot_sensor_l(left_rotation),
     rot_sensor_r(right_rotation),
-    imu(imu_sensor)
+    imu(imu_sensor),
+    circumference(get_wheel_perimeter(config.wheel_type)),
+    factor(1.0 / config.gear_ratio),
 
+    m_params {
+        config.move_pid,
+        config.turn_pid,
+        config.params
+    }
 {
-    this->m_config = config;
-    
-    circumference = M_PI * wheel_diameter;
-    factor        = 1.0 / gear_ratio;
-
-    current_pose  = {
-        .x = 0.0, 
-        .y = 0.0, 
-        .heading = 0.0
-    };
+    current_pose = {0.0, 0.0, 0.0};
 }
 
 // ─────────────────────────────────────────────
@@ -63,7 +60,7 @@ void vortex::Drivetrain::set_brake_mode(const pros::MotorBrake& mode) {
  * Motion methods print to console according to the state
  * of this flag. This is a handy functionality for PID tuning.
 */
-void vortex::Drivetrain::set_debug() {debug = true;}
+void vortex::Drivetrain::set_debug() { debug = true; }
 
 /*
  * set_reversed(): reverses both tracking encoders in software.
@@ -71,7 +68,6 @@ void vortex::Drivetrain::set_debug() {debug = true;}
  * during forward motion. Must be called before the first update_odom() cycle.
  */
 void vortex::Drivetrain::set_reversed() {
-
     rot_sensor_l.set_reversed(true);
     rot_sensor_r.set_reversed(true);
 }
@@ -102,7 +98,10 @@ double vortex::Drivetrain::get_distance() const {
  * This is a snapshot — the background odom task keeps updating current_pose
  * concurrently; do not cache the result across multiple motion commands.
  */
-vortex::Pose vortex::Drivetrain::get_pose() const { return current_pose; }
+vortex::Pose vortex::Drivetrain::get_pose() const {
+    std::lock_guard<pros::Mutex> lock(const_cast<pros::Mutex&>(odom_mutex));
+    return current_pose; 
+}
 
 /*
  * is_overheating(): returns true if any motor in either group exceeds 55 °C.
@@ -128,7 +127,10 @@ bool vortex::Drivetrain::is_overheating() const {
  * relative to the robot's starting tile (adjust for alliance color as needed).
  * Does not reset encoder counts — call reset_positions() separately if needed.
  */
-void vortex::Drivetrain::set_pose(const Pose& pose) { current_pose = pose; }
+void vortex::Drivetrain::set_pose(const Pose& pose) {
+    std::lock_guard<pros::Mutex> lock(odom_mutex);
+    current_pose = pose;
+}
 
 // ─────────────────────────────────────────────
 //  DRIVER CONTROL
@@ -186,11 +188,11 @@ void vortex::Drivetrain::hold(int duration_ms) {
 // ─────────────────────────────────────────────
 
 /*
- * calibrate_imu(): resets and waits for the IMU to finish calibrating.
+ * calibrate_imu(): resets and waits for the IMU sensor to complete calibration.
  * Polls imu.is_calibrating() every 10 ms with a 2-second safety timeout
- * (200 attempts × 10 ms) to avoid blocking initialize() indefinitely if
- * the sensor is disconnected or malfunctioning.
- * Must be called before any method that reads imu.get_heading().
+ * (200 attempts × 10 ms) to prevent blocking if the sensor is disconnected
+ * or malfunctioning. Must be called before any autonomous routine that relies
+ * on imu.get_heading().
  */
 void vortex::Drivetrain::calibrate_imu() {
 
@@ -209,7 +211,6 @@ void vortex::Drivetrain::calibrate_imu() {
  * resetting shared encoder state mid-routine.
  */
 void vortex::Drivetrain::reset_positions() {
-
     rot_sensor_l.reset_position();
     rot_sensor_r.reset_position();
 }
@@ -263,7 +264,7 @@ void vortex::Drivetrain::swing_turn(int degrees, const Side& side, int max_vel) 
         error = normalize_angle(target_heading - heading);
 
         // ── Integral with anti-windup ──────────────────── ─────────────────────
-        if (m_config.turn_pid.ki != 0.0 && std::abs(error) < INTEGRAL_ZONE) {
+        if (m_params.turn_pid.ki != 0.0 && std::abs(error) < INTEGRAL_ZONE) {
             integral += error;
             integral  = std::clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
         } else {
@@ -275,9 +276,9 @@ void vortex::Drivetrain::swing_turn(int degrees, const Side& side, int max_vel) 
 
         // ── Output PID ────────────────────────────────────────────────────────
         double output =
-            (error      * m_config.turn_pid.kp) +
-            (integral   * m_config.turn_pid.ki) +
-            (derivative * m_config.turn_pid.kd);
+            (error      * m_params.turn_pid.kp) +
+            (integral   * m_params.turn_pid.ki) +
+            (derivative * m_params.turn_pid.kd);
 
         // Limit max voltage
         output = std::clamp(output, static_cast<double>(-max_vel), static_cast<double>(max_vel));
@@ -287,9 +288,9 @@ void vortex::Drivetrain::swing_turn(int degrees, const Side& side, int max_vel) 
         // If you notice it stalling, you could multiply min_turn by approximately 1.2.
         if (std::abs(error) > EXIT_ERROR &&
             std::abs(error) < FRICTION_ZONE &&
-            std::abs(output) < m_config.params.min_turn) {
+            std::abs(output) < m_params.params.min_turn) {
 
-            output = (output >= 0.0) ? m_config.params.min_turn : -m_config.params.min_turn;
+            output = (output >= 0.0) ? m_params.params.min_turn : -m_params.params.min_turn;
         }
 
         // ── Settlement Filter (Settle Timer) ─────────────────────────────
@@ -357,11 +358,14 @@ void vortex::Drivetrain::swing_turn(int degrees, const Side& side, int max_vel) 
  * Set the origin with set_pose() at the start of each autonomous routine.
  */
 void vortex::Drivetrain::update_odom() {
+    // 1. Safely stores the previous heading before updating it
+    double prev_heading_rad;
+    {
+        std::lock_guard<pros::Mutex> lock(odom_mutex);
+        prev_heading_rad = current_pose.heading * M_PI / 180.0;
+    }
 
-    // 1. Save the previous heading before updating it
-    double prev_heading_rad = current_pose.heading * M_PI / 180.0;
-
-    // 2. Calculate linear displacement of each wheel (cm)
+    // 2. Calculate the position deltas (in centimeters)
     double pos_l  = (rot_sensor_l.get_position() / 36000.0) * circumference * factor;
     double pos_r  = (rot_sensor_r.get_position() / 36000.0) * circumference * factor;
 
@@ -369,21 +373,25 @@ void vortex::Drivetrain::update_odom() {
     odom_prev_l = pos_l;
     odom_prev_r = pos_r;
 
-    // 3. Update heading from the IMU (more accurate than integrating encoders)
-    current_pose.heading = imu.get_heading();
-    double current_heading_rad = current_pose.heading * M_PI / 180.0;
+    double imu_heading = imu.get_heading();
+    double current_heading_rad = imu_heading * M_PI / 180.0;
 
-    // 4. Delta of heading normalized in [-π, π]
+    // 3. Compute heading change and odometry integration
     double delta_heading = current_heading_rad - prev_heading_rad;
     if (delta_heading >  M_PI) delta_heading -= 2.0 * M_PI;
     if (delta_heading < -M_PI) delta_heading += 2.0 * M_PI;
 
-    // 5. Average angle of the arc traveled in this cycle
     double avg_heading_rad = prev_heading_rad + delta_heading / 2.0;
+    double delta_x = delta_dist * std::sin(avg_heading_rad);
+    double delta_y = delta_dist * std::cos(avg_heading_rad);
 
-    // 6. Project displacement — North = +Y, East = +X (VEX field convention)
-    current_pose.x += delta_dist * std::sin(avg_heading_rad);
-    current_pose.y += delta_dist * std::cos(avg_heading_rad);
+    // 4. Update the pose atomically with the computed deltas
+    {
+        std::lock_guard<pros::Mutex> lock(odom_mutex);
+        current_pose.heading = imu_heading;
+        current_pose.x += delta_x;
+        current_pose.y += delta_y;
+    }
 }
 
 // ─────────────────────────────────────────────
@@ -426,10 +434,10 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
     //                  set above the expected steady-state error so ki kicks in
     //                  before the robot fully stalls
     //  INTEGRAL_LIMIT: symmetric clamp on the integral term to prevent windup
-    //  FRICTION_ZONE : friction compensation applies when error is inside this
-    //                  band (degrees). Must be LARGER than EXIT_ERROR so the
-    //                  compensation is still active when the robot is nearly settled.
-    //                  Rule of thumb: set to ~3–4× EXIT_ERROR.
+    //  FRICTION_ZONE : friction compensation activates when error is inside this
+    //                  band (degrees). Must be LARGER than EXIT_ERROR to ensure
+    //                  the robot maintains torque through final settling stage.
+    //                  Empirical: set to ~5–8× EXIT_ERROR for stable behavior.
     //
     constexpr double EXIT_ERROR     = 1.0;
     constexpr double SETTLE_TIME_MS = 120.0;
@@ -448,7 +456,7 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
         // that windup is not a concern. Reset when outside the zone so that a
         // large approach does not carry a pre-loaded integral into the fine stage.
         //
-        if (m_config.turn_pid.ki != 0.0 && std::abs(error) < INTEGRAL_ZONE) {
+        if (m_params.turn_pid.ki != 0.0 && std::abs(error) < INTEGRAL_ZONE) {
             integral += error;
             integral  = std::clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
         } else {
@@ -460,9 +468,9 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
 
         // ── PID output ────────────────────────────────────────────────────────
         double output =
-            (error      * m_config.turn_pid.kp) +
-            (integral   * m_config.turn_pid.ki) +
-            (derivative * m_config.turn_pid.kd);
+            (error      * m_params.turn_pid.kp) +
+            (integral   * m_params.turn_pid.ki) +
+            (derivative * m_params.turn_pid.kd);
 
         // ── max_vel clamp ─────────────────────────────────────────────────────
         output = std::clamp(
@@ -473,27 +481,23 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
 
         // ── Friction compensation ─────────────────────────────────────────────
         //
-        // Applied AFTER the max_vel clamp so it never exceeds the requested limit.
-        //
-        // Condition: error is inside FRICTION_ZONE (robot is in the fine-approach
-        // stage) AND the PID output is too weak to overcome static friction.
-        //
-        // With FRICTION_ZONE = 8°, this activates before EXIT_ERROR (1°), giving
-        // the robot enough force to keep moving through the last few degrees
-        // instead of stalling at ~4° like the original config did.
+        // Applied AFTER the max_vel clamp to respect user-requested velocity limits.
+        // Activates when: error is in the fine-approach zone AND PID output is
+        // below the minimum torque needed to overcome static friction.
+        // Result: continuous motion through final degrees instead of stalling.
         //
         if (std::abs(error) > EXIT_ERROR &&
             std::abs(error) < FRICTION_ZONE &&
-            std::abs(output) < m_config.params.min_turn) {
+            std::abs(output) < m_params.params.min_turn) {
 
-            output = (output >= 0.0) ? m_config.params.min_turn : -m_config.params.min_turn;
+            output = (output >= 0.0) ? m_params.params.min_turn : -m_params.params.min_turn;
         }
 
         // ── Settle timer ──────────────────────────────────────────────────────
         //
-        // Require the error to stay inside EXIT_ERROR for SETTLE_TIME_MS before
-        // breaking. Prevents a lucky single sample inside the band from exiting
-        // early while the robot is still oscillating through zero.
+        // Requires error to remain inside EXIT_ERROR for SETTLE_TIME_MS before
+        // declaring success. Prevents false exit from transient zero-crossings
+        // during high-frequency oscillations.
         //
         if (std::abs(error) < EXIT_ERROR) {
 
@@ -524,6 +528,8 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
     }
 
     // ── Exit behavior ─────────────────────────────────────────────────────────
+    // Apply firm HOLD brake to prevent drift, then zero motors and restore
+    // the previous brake mode for seamless driver-control transition.
     hold(150);
     left.move(0);
     right.move(0);
@@ -553,6 +559,7 @@ void vortex::Drivetrain::face_angle(double target_heading, int max_vel) {
  * voltage in driver control.
  */
 void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
+
     double start_dist = get_distance();
     double target_angle = imu.get_heading();
     double current_speed = 0.0;
@@ -569,9 +576,10 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
     //  EXIT_ERROR     : tolerance band to start the settle timer (cm)
     //  SETTLE_TIME_MS : how long error must stay inside EXIT_ERROR before exit (ms)
     //  ANGLE_DEADBAND : window to dampen tiny gyro noise and prevent hunting (degrees)
-    //  INTEGRAL_ZONE  : gate — translational integral only accumulates below this error (cm)
-    //  INTEGRAL_LIMIT : symmetric clamp on the translational integral term to prevent windup
-    //  DECEL_STEP     : aggressive deceleration factor to suppress forward overshoot
+    //  INTEGRAL_ZONE  : gate for translational integral accumulation (cm); helps prevent
+    //                   windup during large distance errors
+    //  INTEGRAL_LIMIT : symmetric clamp on integral to cap maximum accumulated error
+    //  DECEL_STEP     : slew rate multiplier for braking; 2.5× accel_st for fast stop
     //
     constexpr double EXIT_ERROR     = 1.0;
     constexpr double SETTLE_TIME_MS = 120.0;
@@ -579,7 +587,7 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
     constexpr double INTEGRAL_ZONE   = 12.0;
     constexpr double INTEGRAL_LIMIT  = 40.0;
     
-    const double DECEL_STEP = m_config.params.accel_st * 2.5;
+    const double DECEL_STEP = m_params.params.accel_st * 2.5;
 
     uint32_t start_time    = pros::millis();
     uint32_t settled_since = 0;
@@ -608,7 +616,7 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
         }
 
         // ── Integral with anti-windup ─────────────────────────────────────────
-        if (m_config.move_pid.ki != 0.0 && std::abs(dist_error) < INTEGRAL_ZONE) {
+        if (m_params.move_pid.ki != 0.0 && std::abs(dist_error) < INTEGRAL_ZONE) {
             integral += dist_error * dt;
             integral  = std::clamp(integral, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
         } else {
@@ -620,9 +628,9 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
 
         // ── Translational PID calculation ─────────────────────────────────────
         double target_speed =
-            (dist_error * m_config.move_pid.kp) +
-            (integral   * m_config.move_pid.ki) +
-            (derivative * m_config.move_pid.kd);
+            (dist_error * m_params.move_pid.kp) +
+            (integral   * m_params.move_pid.ki) +
+            (derivative * m_params.move_pid.kd);
 
         // Maximum velocity clamp
         target_speed = std::clamp(
@@ -633,20 +641,20 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
 
         // ── Friction compensation ─────────────────────────────────────────────
         //
-        // Applied AFTER the max_vel clamp so it never exceeds requested boundaries.
-        // Forces target_speed to meet min_move if the PID is too weak to overcome
-        // the chassis static friction during fine-approach stages.
+        // Applied AFTER the max_vel clamp to respect velocity limits.
+        // Boosts output to min_move when PID falls below the threshold needed
+        // to overcome static friction in the approach zone.
         //
-        if (std::abs(dist_error) > EXIT_ERROR && std::abs(target_speed) < m_config.params.min_move) {
-            target_speed = (target_speed >= 0.0) ? m_config.params.min_move : -m_config.params.min_move;
+        if (std::abs(dist_error) > EXIT_ERROR && std::abs(target_speed) < m_params.params.min_move) {
+            target_speed = (target_speed >= 0.0) ? m_params.params.min_move : -m_params.params.min_move;
         }
 
         // ── Bidirectional slew rate ──────────────────────────────────────────
         //
-        // Dynamically adjusts the step magnitude. Uses a sharper DECEL_STEP if 
-        // the robot needs to slow down fast to prevent running past the target point.
+        // Asymmetric acceleration/deceleration: DECEL_STEP is 2.5× faster to brake
+        // hard and prevent overshoot when approaching the target distance.
         //
-        double step = (std::abs(target_speed) < std::abs(current_speed)) ? DECEL_STEP : m_config.params.accel_st;
+        double step = (std::abs(target_speed) < std::abs(current_speed)) ? DECEL_STEP : m_params.params.accel_st;
         double delta = target_speed - current_speed;
         
         delta = std::clamp(delta, -step, step);
@@ -654,9 +662,8 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
 
         // ── Angular correction (Heading hold) ─────────────────────────────────
         //
-        // Keeps the robot driving in a perfectly straight line using the IMU.
-        // Scale down the error if it falls under ANGLE_DEADBAND to eliminate 
-        // high-frequency chatter from sensor fluctuations.
+        // Uses IMU to steer straight along the target heading. Applies a deadband
+        // (scale × 0.3) when error is small to suppress sensor noise and oscillation.
         //
         double angle_error = normalize_angle(target_angle - imu.get_heading());
 
@@ -664,7 +671,7 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
             angle_error *= 0.3;
         }
 
-        int steer_output = static_cast<int>(angle_error * m_config.params.angle_kp);
+        int steer_output = static_cast<int>(angle_error * m_params.params.angle_kp);
 
         // ── Final motor output layout ─────────────────────────────────────────
         int left_command  = static_cast<int>(current_speed) + steer_output;
@@ -678,7 +685,7 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
             );
         }
 
-        // Output to the physical hardware with safety maximum constraints
+        // ── Motor output with safety clamping ──────────────────────────────────
         left.move(std::clamp(left_command, -max_vel, max_vel));
         right.move(std::clamp(right_command, -max_vel, max_vel));
 
@@ -687,29 +694,25 @@ void vortex::Drivetrain::move_centimeters(int target_cm, int max_vel) {
     }
 
     // ── Exit behavior ─────────────────────────────────────────────────────────
-    // Actively lock down position using HOLD to cancel momentum, then release
-    // the system state safely to preserve driver manual baseline setups.
+    // Apply firm HOLD brake to prevent drift, then zero motors and restore
+    // the previous brake mode for seamless driver-control transition.
     hold(150);
     left.move(0);
     right.move(0);
 }
 
 /*
- * drive_to_point(): moves the robot to a field coordinate (x, y) in two phases:
- *   1. Compute bearing with atan2(dx, dy) — Norte = 0° convention matches the IMU.
- *   2. face_angle() to that bearing.
- *   3. move_centimeters() by the Euclidean distance.
+ * drive_to_point(): navigates to a field coordinate (x, y) by turning then moving.
  *
- * Smart reverse: if the required turn exceeds 90°, it is cheaper to drive
- * backward. In that case the distance is negated and the target heading is
- * flipped by 180°, so face_angle() turns to the rear-facing direction instead.
+ * Algorithm: Compute bearing with atan2(dx, dy) [North = 0°], face that angle,
+ * then drive the Euclidean distance. Smart reverse: if target requires >90° turn,
+ * negate distance and flip heading by 180° to drive backward instead — cheaper.
  *
- * Requires update_odom() running in the background so current_pose reflects
- * the actual position at the time of the call. Call set_pose() before the
- * autonomous routine to establish the correct field origin.
+ * Prerequisite: update_odom() running in background, set_pose() called at routine
+ * start to establish field origin. Odometry-dependent — errors accumulate over time.
  *
- * Limitation: two-phase path (turn then straight line). For continuous curved
- * trajectories consider Pure Pursuit using the same odometry foundation.
+ * Limitation: Two-phase (turn + straight). For smooth curved paths, consider
+ * Pure Pursuit or similar trajectory-following algorithms.
  */
 void vortex::Drivetrain::drive_to_point(double x, double y, int max_vel) {
 
