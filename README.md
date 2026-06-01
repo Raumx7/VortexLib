@@ -11,24 +11,150 @@ pros c fetch https://github.com/Raumx7/VortexLib/releases/download/v0.1.0/vortex
 pros c apply vortexlib
 ```
 
-Then include the header in your project:
+Then include the header files in your project as needed.
+
+---
+
+## Helper Types and Utilities
+
+Before using `Drivetrain` or `SimpleDrivetrain`, familiarize yourself with the helper types and functions defined in `types.h`. These are used throughout the library.
+
+<br>
+<p align="center">
+  <img src="images/HelperTypesUML.png" alt="Helper-types-UML" style="max-width: 100%; height: auto;" />
+</p>
+
+### Type Definitions
+
+#### `Side` enum
+
+Specifies which side of the chassis to pivot around in `swing_turn()` methods.
 
 ```cpp
-#include "vortexlib/drivetrain.h"
+enum class Side : uint8_t { LEFT, RIGHT };
+```
+
+#### `Wheel` enum
+
+Represents VEX V5 omni-wheel sizes. Used to automatically calculate wheel circumference.
+
+```cpp
+enum class Wheel : uint8_t {
+    OMNI_275,   // 2.75" diameter
+    OMNI_325,   // 3.25" diameter
+    OMNI_400,   // 4.00" diameter
+    OMNI_4125,  // 4.125" diameter
+    OMNI_4175   // 4.175" diameter
+};
+```
+
+#### `Pose` struct
+
+Represents a position on the field — used by odometry and high-level navigation.
+
+```cpp
+struct Pose {
+    double x       = 0.0;   // Horizontal position (cm, East)
+    double y       = 0.0;   // Vertical position (cm, North)
+    double heading = 0.0;   // Rotation (degrees, [0, 360) — 0° = North)
+};
+```
+
+#### `PIDConstants` struct
+
+Holds proportional, integral, and derivative gains for one PID loop. Used in both motion and turning.
+
+```cpp
+struct PIDConstants {
+    double kp = 0.0;   // Proportional gain
+    double ki = 0.0;   // Integral gain
+    double kd = 0.0;   // Derivative gain
+};
+```
+
+#### `MoveParams` struct
+
+Motion parameters shared across all autonomous methods.
+
+```cpp
+struct MoveParams {
+    double angle_kp;    // Heading correction strength in move_centimeters()
+    double accel_st;    // Acceleration step (output/20ms) during ramp-up
+    double min_move;    // Minimum output to overcome friction in move_centimeters()
+    double min_turn;    // Minimum output to overcome friction in turning
+};
+```
+
+### Utility Functions
+
+#### `get_wheel_perimeter(const Wheel& wheel)`
+
+Returns the circumference of the selected wheel in centimeters. Automatically converts from wheel diameter.
+
+```cpp
+double circumference = vortex::get_wheel_perimeter(vortex::Wheel::OMNI_325);  // ~10.21 cm
+```
+
+#### `normalize_angle(double angle)`
+
+Wraps an angle to the range [-180, 180]. Useful when comparing heading differences to find the shortest rotation path.
+
+```cpp
+double diff = vortex::normalize_angle(target - current);  // Always returns [-180, 180]
 ```
 
 ---
 
 ## Drivetrain class
 
-![Drivetrain UML diagram](images/drivetrainUML.png)
+<br>
+<p align="left">
+  <img src="images/DrivetrainUML.png" alt="Drivetrian-UML" style="max-width: 100%; height: auto;" />
+</p>
+
+### Header file
+
+```cpp
+#include "vortexlib/drivetrain.h"
+```
 
 ### Constructor
 
-The `Drivetrain` constructor takes references to all hardware objects and a `DriveConfig` struct containing every tunable parameter. No sensor initialization happens here — sensors must be declared globally before being passed in.
+The `Drivetrain` constructor takes references to all hardware objects and a `Config` struct containing every tunable parameter. No sensor initialization happens here — sensors must be declared globally before being passed in.
+
+#### `Drivetrain::Config` struct
+
+<br>
+<p align="left">
+  <img src="images/DrivetrainConfigUML.png" alt="Drivetrain-config-UML" style="max-width: 100%; height: auto;" />
+</p>
+
+Before instantiating `Drivetrain`, create a `Config` struct with your PID constants and motion parameters:
 
 ```cpp
-vortex::Drivetrain chasis(m_left, m_right, rot_l, rot_r, imu, configs, 8.25, (60.0 / 36.0));
+vortex::Drivetrain::Config config {
+    .move_pid  = {.kp = 2.5, .ki = 0.0, .kd = 0.08},
+    .turn_pid  = {.kp = 1.5, .ki = 0.0, .kd = 0.90},
+    .params    = {
+        .angle_kp = 9.0,
+        .accel_st = 7.0,
+        .min_move = 30.0,
+        .min_turn = 15.0
+    },
+    .wheel_type = vortex::Wheel::OMNI_325,
+    .gear_ratio = 60.0 / 36.0  // wheel_teeth / motor_teeth
+};
+```
+
+#### Constructor Signature
+
+```cpp
+Drivetrain(pros::MotorGroup& left_motors,
+           pros::MotorGroup& right_motors,
+           pros::Rotation& left_rotation,
+           pros::Rotation& right_rotation,
+           pros::IMU& imu_sensor,
+           const Config& config);
 ```
 
 | Parameter | Type | Description |
@@ -38,35 +164,15 @@ vortex::Drivetrain chasis(m_left, m_right, rot_l, rot_r, imu, configs, 8.25, (60
 | `left_rotation` | `pros::Rotation&` | Left tracking encoder |
 | `right_rotation` | `pros::Rotation&` | Right tracking encoder |
 | `imu_sensor` | `pros::IMU&` | Inertial sensor |
-| `config` | `const DriveConfig&` | PID constants and motion parameters |
-| `wheel_diameter` | `double` | Wheel diameter in centimeters |
-| `gear_ratio` | `double` | `motor_teeth / wheel_teeth` — defaults to `1.0` |
+| `config` | `const Config&` | PID constants, motion parameters, wheel type, and gear ratio |
 
 ---
 
-### DriveConfig
+### Config Details
 
-`DriveConfig` groups all tunable values into one struct so they stay in `main.cpp` and never require touching the library source. It contains two `PIDConstants` structs and one `MoveParams` struct.
+#### `PIDConstants`
 
-```cpp
-vortex::DriveConfig configs {
-
-    {.kp = 2.5, .ki = 0.0, .kd = 0.08},  // move_pid
-    {.kp = 1.5, .ki = 0.0, .kd = 0.90},  // turn_pid
-
-    {
-        .angle_kp = 9.0,    // move heading correction
-        .accel_st = 7.0,    // move acceleration step
-        .min_move = 30.0,   // min. move output
-        .min_turn = 15.0    // min. turn output
-    }
-
-};
-```
-
-#### PIDConstants
-
-Used for both `move_pid` and `turn_pid`.
+Used for both `move_pid` and `turn_pid`. See the **Helper Types and Utilities** section above for full details.
 
 | Field | Type | Description |
 |---|---|---|
@@ -74,7 +180,9 @@ Used for both `move_pid` and `turn_pid`.
 | `ki` | `double` | Integral gain — corrects steady-state error; keep `0.0` until `kp` and `kd` are tuned |
 | `kd` | `double` | Derivative gain — dampens overshoot; acts as a predictive brake |
 
-#### MoveParams
+#### `MoveParams`
+
+Shared motion parameters across all autonomous methods.
 
 | Field | Type | Affects | Description |
 |---|---|---|---|
@@ -188,21 +296,20 @@ pros::IMU        imu(16);
 pros::Rotation   rot_l(13);
 pros::Rotation   rot_r(19);
 
-vortex::DriveConfig configs {
-
-    {.kp = 2.5, .ki = 0.0, .kd = 0.08},  // move_pid
-    {.kp = 1.5, .ki = 0.0, .kd = 0.90},  // turn_pid
-
-    {
+vortex::Drivetrain::Config config {
+    .move_pid  = {.kp = 2.5, .ki = 0.0, .kd = 0.08},
+    .turn_pid  = {.kp = 1.5, .ki = 0.0, .kd = 0.90},
+    .params    = {
         .angle_kp = 9.0,
         .accel_st = 7.0,
         .min_move = 30.0,
         .min_turn = 15.0
-    }
-
+    },
+    .wheel_type = vortex::Wheel::OMNI_325,
+    .gear_ratio = 60.0 / 36.0
 };
 
-vortex::Drivetrain chasis(m_left, m_right, rot_l, rot_r, imu, configs, 8.25, (60.0 / 36.0));
+vortex::Drivetrain chasis(m_left, m_right, rot_l, rot_r, imu, config);
 
 void initialize() {
     chasis.calibrate_imu();
@@ -210,6 +317,170 @@ void initialize() {
 
     pros::Task odom_task([](void* param) {
         auto* c = static_cast<vortex::Drivetrain*>(param);
+        while (true) { c->update_odom(); pros::delay(10); }
+    }, &chasis, "odom");
+}
+```
+
+---
+
+## SimpleDrivetrain class
+
+For robots with **single motors** instead of motor groups, and **optional IMU** (falls back to dead reckoning if unavailable), use `SimpleDrivetrain`. It shares the same API as `Drivetrain` but with two overloaded constructors to support configurations with and without an IMU.
+
+<br>
+<p align="left">
+  <img src="images/SimpleDrivetrainUML.png" alt="Simple-drivetrian-UML" style="max-width: 100%; height: auto;" />
+</p>
+
+### Header file
+
+```cpp
+#include "vortexlib/simple_drivetrain.h"
+```
+
+### Constructor
+
+`SimpleDrivetrain` provides two constructors: one with IMU and one without. The IMU is optional; if not provided, heading estimation uses dead reckoning from rotation sensor differentials.
+
+#### `SimpleDrivetrain::Config` struct
+
+<br>
+<p align="left">
+  <img src="images/SimpleDrivetrainConfigUML.png" alt="Simple-drivetrain-config-UML" style="max-width: 100%; height: auto;" />
+</p>
+
+Create a `Config` struct with your tuning parameters. It is identical to `Drivetrain::Config` but also includes `track_wd` (track width) for dead reckoning when the IMU is unavailable:
+
+```cpp
+vortex::SimpleDrivetrain::Config config {
+    .move_pid  = {.kp = 2.5, .ki = 0.0, .kd = 0.08},
+    .turn_pid  = {.kp = 1.5, .ki = 0.0, .kd = 0.90},
+    .params    = {
+        .angle_kp = 9.0,
+        .accel_st = 7.0,
+        .min_move = 30.0,
+        .min_turn = 15.0
+    },
+    .wheel_type = vortex::Wheel::OMNI_325,
+    .gear_ratio = 60.0 / 36.0,   // wheel_teeth / motor_teeth
+    .track_wd = 28.5             // distance between left and right wheels (cm)
+};
+```
+
+#### Constructor Signatures
+
+**With IMU:**
+
+```cpp
+SimpleDrivetrain(pros::Motor& left_motor,
+                 pros::Motor& right_motor,
+                 pros::Rotation& left_rotation,
+                 pros::Rotation& right_rotation,
+                 pros::IMU& imu_sensor,
+                 const Config& config);
+```
+
+**Without IMU (falls back to dead reckoning):**
+
+```cpp
+SimpleDrivetrain(pros::Motor& left_motor,
+                 pros::Motor& right_motor,
+                 pros::Rotation& left_rotation,
+                 pros::Rotation& right_rotation,
+                 const Config& config);
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `left_motor` | `pros::Motor&` | Left drive motor |
+| `right_motor` | `pros::Motor&` | Right drive motor |
+| `left_rotation` | `pros::Rotation&` | Left tracking encoder |
+| `right_rotation` | `pros::Rotation&` | Right tracking encoder |
+| `imu_sensor` | `pros::IMU&` | *(Optional)* Inertial sensor — omit constructor if unavailable |
+| `config` | `const Config&` | PID constants, motion parameters, wheel type, gear ratio, and track width |
+
+#### `get_heading()` — Intelligent Heading Estimation
+
+`SimpleDrivetrain` implements an intelligent `get_heading()` method that adapts to your hardware configuration:
+
+- **If IMU is available:** Returns `imu.get_heading()` directly.
+- **If IMU is unavailable:** Estimates heading from rotation sensor differentials using dead reckoning.
+
+This allows full autonomous functionality even without an IMU, though drift accumulates over long routines.
+
+### Setup Example (With IMU)
+
+```cpp
+#include "main.h"
+#include "vortexlib/drivetrain.h"
+
+pros::Motor      m_left(1);
+pros::Motor      m_right(2);
+pros::IMU        imu(16);
+pros::Rotation   rot_l(13);
+pros::Rotation   rot_r(19);
+
+vortex::SimpleDrivetrain::Config config {
+    .move_pid  = {.kp = 2.5, .ki = 0.0, .kd = 0.08},
+    .turn_pid  = {.kp = 1.5, .ki = 0.0, .kd = 0.90},
+    .params    = {
+        .angle_kp = 9.0,
+        .accel_st = 7.0,
+        .min_move = 30.0,
+        .min_turn = 15.0
+    },
+    .wheel_type = vortex::Wheel::OMNI_325,
+    .gear_ratio = 60.0 / 36.0,
+    .track_wd = 28.5
+};
+
+vortex::SimpleDrivetrain chasis(m_left, m_right, rot_l, rot_r, imu, config);
+
+void initialize() {
+    chasis.calibrate_imu();
+    chasis.reset_positions();
+
+    pros::Task odom_task([](void* param) {
+        auto* c = static_cast<vortex::SimpleDrivetrain*>(param);
+        while (true) { c->update_odom(); pros::delay(10); }
+    }, &chasis, "odom");
+}
+```
+
+### Setup Example (Without IMU)
+
+```cpp
+#include "main.h"
+#include "vortexlib/drivetrain.h"
+
+pros::Motor      m_left(1);
+pros::Motor      m_right(2);
+pros::Rotation   rot_l(13);
+pros::Rotation   rot_r(19);
+
+vortex::SimpleDrivetrain::Config config {
+    .move_pid  = {.kp = 2.5, .ki = 0.0, .kd = 0.08},
+    .turn_pid  = {.kp = 1.5, .ki = 0.0, .kd = 0.90},
+    .params    = {
+        .angle_kp = 9.0,
+        .accel_st = 7.0,
+        .min_move = 30.0,
+        .min_turn = 15.0
+    },
+    .wheel_type = vortex::Wheel::OMNI_325,
+    .gear_ratio = 60.0 / 36.0,
+    .track_wd = 28.5
+};
+
+// Constructor without IMU parameter — heading uses dead reckoning
+vortex::SimpleDrivetrain chasis(m_left, m_right, rot_l, rot_r, config);
+
+void initialize() {
+    chasis.reset_positions();
+
+    pros::Task odom_task([](void* param) {
+        auto* c = static_cast<vortex::SimpleDrivetrain*>(param);
         while (true) { c->update_odom(); pros::delay(10); }
     }, &chasis, "odom");
 }
