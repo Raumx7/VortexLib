@@ -177,9 +177,10 @@ void vortex::Drivetrain::hold(int duration_ms) {
 
     if (duration_ms > 0) {
         pros::delay(duration_ms);
-
         left.set_brake_mode(previous_brake_mode);
         right.set_brake_mode(previous_brake_mode);
+    } else {
+        previous_brake_mode = pros::MotorBrake::hold;
     }
 }
 
