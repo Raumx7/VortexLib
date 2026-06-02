@@ -1,17 +1,24 @@
 # VortexLib
 
-PROS library for chassis control and odometry of our robot.
+**VortexLib** is a PROS library designed for comprehensive chassis control and odometry of our robot. It provides easy-to-use abstractions for managing drivetrain movements, tracking robot position, and coordinating complex autonomous routines.
 
 ## Installation
 
-Fetch and apply the library using the PROS CLI:
+To integrate **VortexLib** into your PROS robot project, open a terminal in your robot's project folder and execute the following commands:
 
 ```bash
-pros c fetch https://github.com/Raumx7/VortexLib/releases/download/v0.1.0/vortexlib@0.1.0.zip
+curl -L -o vortexlib@0.1.0.zip https://github.com/Raumx7/VortexLib/releases/download/v0.1.0/vortexlib@0.1.0.zip
+```
+```bash
+pros c fetch ./vortexlib@0.1.0.zip
+```
+```bash
 pros c apply vortexlib
 ```
 
-Then include the header files in your project as needed.
+**Note:** On Windows PowerShell, use `curl.exe` instead of `curl` for the first command.
+
+Then include the header files in your project as needed. Once you fetched the library template, you'll only need the `pros c apply` command for future projects.
 
 ---
 
